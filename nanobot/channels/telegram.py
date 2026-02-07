@@ -1,11 +1,16 @@
 """Telegram channel implementation using python-telegram-bot."""
 
 import asyncio
+import logging
 import re
 
 from loguru import logger
 from telegram import Update
 from telegram.ext import Application, MessageHandler, filters, ContextTypes
+
+# Suppress noisy network errors from Telegram polling (they auto-retry)
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 from nanobot.bus.events import OutboundMessage
 from nanobot.bus.queue import MessageBus
@@ -100,8 +105,16 @@ class TelegramChannel(BaseChannel):
         
         self._running = True
         
-        # Build the application
-        builder = Application.builder().token(self.config.token)
+        # Build the application with connection settings for better reliability
+        # Timeouts are for HTTP requests only, not for AI response generation
+        builder = (
+            Application.builder()
+            .token(self.config.token)
+            .connect_timeout(60.0)
+            .pool_timeout(60.0)
+            .write_timeout(300.0)  # Sending messages (long content)
+            .read_timeout(60.0)    # Polling for new messages
+        )
         if self.config.proxy:
             builder = builder.proxy(self.config.proxy).get_updates_proxy(self.config.proxy)
         self._app = builder.build()
@@ -155,29 +168,100 @@ class TelegramChannel(BaseChannel):
         if not self._app:
             logger.warning("Telegram bot not running")
             return
-        
+
         try:
-            # chat_id should be the Telegram chat ID (integer)
             chat_id = int(msg.chat_id)
-            # Convert markdown to Telegram HTML
-            html_content = _markdown_to_telegram_html(msg.content)
+        except ValueError:
+            logger.error(f"Invalid chat_id: {msg.chat_id}")
+            return
+
+        # Telegram message size limit
+        MAX_SIZE = 4096
+
+        # If content is short, send directly
+        if len(msg.content) <= MAX_SIZE:
+            await self._send_single(chat_id, msg.content)
+            return
+
+        # Split long content and send in chunks
+        chunks = self._split_message(msg.content, MAX_SIZE)
+        logger.info(f"Splitting long message ({len(msg.content)} chars) into {len(chunks)} chunks")
+
+        for i, chunk in enumerate(chunks):
+            # Add progress indicator for multi-part messages
+            if len(chunks) > 1:
+                chunk = f"[{i+1}/{len(chunks)}]\n\n{chunk}"
+            await self._send_single(chat_id, chunk)
+            # Small delay between chunks to avoid rate limits
+            if i < len(chunks) - 1:
+                await asyncio.sleep(0.5)
+
+    async def _send_single(self, chat_id: int, content: str) -> None:
+        """Send a single message, with HTML fallback."""
+        try:
+            html_content = _markdown_to_telegram_html(content)
             await self._app.bot.send_message(
                 chat_id=chat_id,
                 text=html_content,
                 parse_mode="HTML"
             )
-        except ValueError:
-            logger.error(f"Invalid chat_id: {msg.chat_id}")
         except Exception as e:
             # Fallback to plain text if HTML parsing fails
             logger.warning(f"HTML parse failed, falling back to plain text: {e}")
             try:
                 await self._app.bot.send_message(
-                    chat_id=int(msg.chat_id),
-                    text=msg.content
+                    chat_id=chat_id,
+                    text=content
                 )
             except Exception as e2:
                 logger.error(f"Error sending Telegram message: {e2}")
+
+    def _split_message(self, text: str, max_size: int) -> list[str]:
+        """Split message into chunks, respecting code blocks and paragraphs."""
+        if len(text) <= max_size:
+            return [text]
+
+        chunks = []
+        current_chunk = ""
+        remaining = text
+
+        # Priority split points (in order)
+        split_patterns = [
+            "\n\n```\n\n",      # Between code blocks
+            "\n\n",             # Paragraph breaks
+            "\n",               # Line breaks
+            "。",               # Chinese period
+            ". ",               # English period
+            "！",               # Chinese exclamation
+            "! ",               # English exclamation
+            "？",               # Chinese question mark
+            "? ",               # English question mark
+            "；",               # Chinese semicolon
+            "; ",               # English semicolon
+        ]
+
+        while remaining:
+            if len(remaining) <= max_size:
+                chunks.append(remaining)
+                break
+
+            # Find best split point
+            split_pos = -1
+            for pattern in split_patterns:
+                # Search in reverse to find the last occurrence before limit
+                pos = remaining.rfind(pattern, 0, max_size)
+                if pos != -1:
+                    split_pos = pos + len(pattern)
+                    break
+
+            # If no good split point, force split at max_size
+            if split_pos == -1:
+                split_pos = max_size
+
+            chunks.append(remaining[:split_pos])
+            remaining = remaining[split_pos:].lstrip()
+
+        return chunks
     
     async def _on_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle /start command."""
