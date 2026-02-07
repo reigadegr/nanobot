@@ -45,6 +45,7 @@ class AgentLoop:
         exec_config: "ExecToolConfig | None" = None,
         cron_service: "CronService | None" = None,
         restrict_to_workspace: bool = False,
+        memu_config: Any = None,
     ):
         from nanobot.config.schema import ExecToolConfig
         from nanobot.cron.service import CronService
@@ -57,8 +58,9 @@ class AgentLoop:
         self.exec_config = exec_config or ExecToolConfig()
         self.cron_service = cron_service
         self.restrict_to_workspace = restrict_to_workspace
-        
-        self.context = ContextBuilder(workspace)
+        self.memu_config = memu_config
+
+        self.context = ContextBuilder(workspace, memu_config=memu_config)
         self.sessions = SessionManager(workspace)
         self.tools = ToolRegistry()
         self.subagents = SubagentManager(

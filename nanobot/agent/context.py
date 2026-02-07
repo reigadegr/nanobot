@@ -6,24 +6,39 @@ import platform
 from pathlib import Path
 from typing import Any
 
-from nanobot.agent.memory import MemoryStore
+from nanobot.agent.memory import MemoryStore, MemUMemoryStore
 from nanobot.agent.skills import SkillsLoader
 
 
 class ContextBuilder:
     """
     Builds the context (system prompt + messages) for the agent.
-    
+
     Assembles bootstrap files, memory, skills, and conversation history
     into a coherent prompt for the LLM.
     """
-    
+
     BOOTSTRAP_FILES = ["AGENTS.md", "SOUL.md", "USER.md", "TOOLS.md", "IDENTITY.md"]
-    
-    def __init__(self, workspace: Path):
+
+    def __init__(self, workspace: Path, memu_config: Any = None):
+        """
+        Initialize the context builder.
+
+        Args:
+            workspace: Path to the workspace directory.
+            memu_config: Optional MemUConfig for MemU memory system.
+        """
         self.workspace = workspace
-        self.memory = MemoryStore(workspace)
+        self.memu_config = memu_config
         self.skills = SkillsLoader(workspace)
+
+        # Use MemU memory if configured and enabled
+        if memu_config and getattr(memu_config, 'enabled', False):
+            self.memory = MemUMemoryStore(memu_config)
+            self.memory_mode = "memu"
+        else:
+            self.memory = MemoryStore(workspace)
+            self.memory_mode = "file"
     
     def build_system_prompt(self, skill_names: list[str] | None = None) -> str:
         """

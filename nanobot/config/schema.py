@@ -105,6 +105,24 @@ class ExecToolConfig(BaseModel):
     timeout: int = 60
 
 
+class MemUConfig(BaseModel):
+    """MemU memory system configuration."""
+    enabled: bool = False
+    # PostgreSQL connection
+    host: str = "localhost"
+    port: int = 5432
+    database: str = "memu"
+    user: str = "postgres"
+    password: str = ""
+    # LLM configuration for memU
+    api_key: str = ""  # OpenAI API key for embeddings
+    base_url: str = "https://api.openai.com/v1"
+    chat_model: str = "gpt-4o-mini"
+    embed_model: str = "text-embedding-3-small"
+    # Resources storage
+    resources_dir: str = "~/.nanobot/memu/resources"
+
+
 class ToolsConfig(BaseModel):
     """Tools configuration."""
     web: WebToolsConfig = Field(default_factory=WebToolsConfig)
@@ -119,6 +137,7 @@ class Config(BaseSettings):
     providers: ProvidersConfig = Field(default_factory=ProvidersConfig)
     gateway: GatewayConfig = Field(default_factory=GatewayConfig)
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
+    memu: MemUConfig = Field(default_factory=MemUConfig)
     
     @property
     def workspace_path(self) -> Path:
