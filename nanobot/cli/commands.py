@@ -188,7 +188,7 @@ def gateway(
     if is_instance_running("gateway"):
         console.print("[yellow]⚠️  Nanobot gateway is already running![/yellow]")
         console.print("\n[dim]To stop the existing instance, use:[/dim]")
-        console.print("  [cyan]pkill -f 'nanobot gateway'[/cyan]")
+        console.print("  [cyan]pkill -f 'nanobot gateway' -9[/cyan]")
         raise typer.Exit(1)
 
     # Acquire lock
