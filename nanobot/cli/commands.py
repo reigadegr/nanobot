@@ -182,7 +182,24 @@ def gateway(
     from nanobot.cron.service import CronService
     from nanobot.cron.types import CronJob
     from nanobot.heartbeat.service import HeartbeatService
-    
+    from nanobot.utils.helpers import is_instance_running, acquire_instance_lock
+
+    # Check for existing instance
+    if is_instance_running("gateway"):
+        console.print("[yellow]⚠️  Nanobot gateway is already running![/yellow]")
+        console.print("\n[dim]To stop the existing instance, use:[/dim]")
+        console.print("  [cyan]pkill -f 'nanobot gateway'[/cyan]")
+        raise typer.Exit(1)
+
+    # Acquire lock
+    try:
+        if not acquire_instance_lock("gateway"):
+            console.print("[red]Failed to acquire instance lock[/red]")
+            raise typer.Exit(1)
+    except RuntimeError as e:
+        console.print(f"[red]Lock error: {e}[/red]")
+        raise typer.Exit(1)
+
     if verbose:
         import logging
         logging.basicConfig(level=logging.DEBUG)

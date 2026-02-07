@@ -115,8 +115,11 @@ class TelegramChannel(BaseChannel):
             .write_timeout(300.0)  # Sending messages (long content)
             .read_timeout(60.0)    # Polling for new messages
         )
+
+        # Configure proxy if specified
         if self.config.proxy:
-            builder = builder.proxy(self.config.proxy).get_updates_proxy(self.config.proxy)
+            builder = builder.proxy(self.config.proxy)
+
         self._app = builder.build()
         
         # Add message handler for text, photos, voice, documents
@@ -131,9 +134,9 @@ class TelegramChannel(BaseChannel):
         # Add /start command handler
         from telegram.ext import CommandHandler
         self._app.add_handler(CommandHandler("start", self._on_start))
-        
+
         logger.info("Starting Telegram bot (polling mode)...")
-        
+
         # Initialize and start polling
         await self._app.initialize()
         await self._app.start()

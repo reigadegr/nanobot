@@ -1,5 +1,6 @@
 """LiteLLM provider implementation for multi-provider support."""
 
+import asyncio
 import os
 from typing import Any
 
@@ -60,8 +61,8 @@ class LiteLLMProvider(LLMProvider):
             elif "gemini" in default_model.lower():
                 os.environ.setdefault("GEMINI_API_KEY", api_key)
             elif "zhipu" in default_model or "glm" in default_model or "zai" in default_model:
-                os.environ.setdefault("ZAI_API_KEY", api_key)
-                os.environ.setdefault("ZHIPUAI_API_KEY", api_key)
+                os.environ["ZAI_API_KEY"] = api_key
+                os.environ["ZHIPUAI_API_KEY"] = api_key
             elif "dashscope" in default_model or "qwen" in default_model.lower():
                 os.environ.setdefault("DASHSCOPE_API_KEY", api_key)
             elif "groq" in default_model:
@@ -135,7 +136,11 @@ class LiteLLMProvider(LLMProvider):
         # Pass api_base directly for custom endpoints (vLLM, etc.)
         if self.api_base:
             kwargs["api_base"] = self.api_base
-        
+
+        # Pass api_key for zai/zhipu models (they need explicit api_key)
+        if self.api_key and ("zai" in model or "zhipu" in model or "glm" in model.lower()):
+            kwargs["api_key"] = self.api_key
+
         # Pass extra headers (e.g. APP-Code for AiHubMix)
         if self.extra_headers:
             kwargs["extra_headers"] = self.extra_headers
@@ -144,15 +149,38 @@ class LiteLLMProvider(LLMProvider):
             kwargs["tools"] = tools
             kwargs["tool_choice"] = "auto"
         
-        try:
-            response = await acompletion(**kwargs)
-            return self._parse_response(response)
-        except Exception as e:
-            # Return error as content for graceful handling
-            return LLMResponse(
-                content=f"Error calling LLM: {str(e)}",
-                finish_reason="error",
-            )
+        # Retry logic with exponential backoff for rate limits
+        max_retries = 5
+        base_delay = 2  # seconds
+
+        for attempt in range(max_retries):
+            try:
+                response = await acompletion(**kwargs)
+                return self._parse_response(response)
+            except Exception as e:
+                error_str = str(e).lower()
+                is_rate_limit = any(keyword in error_str for keyword in [
+                    "rate limit", "ratelimit", "rate_limit", "429", "zaiexception"
+                ])
+
+                if is_rate_limit and attempt < max_retries - 1:
+                    # Exponential backoff: 2s, 4s, 8s, 16s
+                    delay = base_delay * (2 ** attempt)
+                    print(f"[LiteLLM] Rate limit hit, retrying in {delay}s... (attempt {attempt + 1}/{max_retries})")
+                    await asyncio.sleep(delay)
+                    continue
+
+                # Return error as content for graceful handling
+                return LLMResponse(
+                    content=f"Error calling LLM: {str(e)}",
+                    finish_reason="error",
+                )
+
+        # Should not reach here, but just in case
+        return LLMResponse(
+            content="Error calling LLM: Max retries exceeded",
+            finish_reason="error",
+        )
     
     def _parse_response(self, response: Any) -> LLMResponse:
         """Parse LiteLLM response into our standard format."""
