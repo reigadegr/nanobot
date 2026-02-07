@@ -9,17 +9,53 @@ from typing import Any
 from nanobot.utils.helpers import ensure_dir, today_date
 
 
+def _truncate_text(text: str, max_chars: int, add_ellipsis: bool = True) -> str:
+    """
+    Truncate text to a maximum character count while preserving word boundaries.
+
+    Args:
+        text: The text to truncate.
+        max_chars: Maximum number of characters to keep.
+        add_ellipsis: Whether to add "..." at the end if truncated.
+
+    Returns:
+        Truncated text.
+    """
+    if len(text) <= max_chars:
+        return text
+
+    # Try to truncate at a word boundary
+    truncated = text[:max_chars]
+    last_space = truncated.rfind(" ")
+    if last_space > max_chars * 0.8:  # If we found a space in the last 20%
+        truncated = truncated[:last_space]
+
+    if add_ellipsis:
+        truncated = truncated.rstrip() + "..."
+    return truncated
+
+
 class MemoryStore:
     """
     Memory system for the agent.
-    
+
     Supports daily notes (memory/YYYY-MM-DD.md) and long-term memory (MEMORY.md).
+
+    Token management:
+    - Long-term memory is truncated to prevent token explosion
+    - Daily notes are truncated to a configurable limit
     """
-    
-    def __init__(self, workspace: Path):
+
+    # Default limits (can be overridden via config)
+    DEFAULT_LONG_TERM_MAX_CHARS = 2000
+    DEFAULT_DAILY_MAX_CHARS = 1000
+
+    def __init__(self, workspace: Path, long_term_max_chars: int | None = None, daily_max_chars: int | None = None):
         self.workspace = workspace
         self.memory_dir = ensure_dir(workspace / "memory")
         self.memory_file = self.memory_dir / "MEMORY.md"
+        self.long_term_max_chars = long_term_max_chars or self.DEFAULT_LONG_TERM_MAX_CHARS
+        self.daily_max_chars = daily_max_chars or self.DEFAULT_DAILY_MAX_CHARS
     
     def get_today_file(self) -> Path:
         """Get path to today's memory file."""
@@ -93,22 +129,26 @@ class MemoryStore:
     def get_memory_context(self) -> str:
         """
         Get memory context for the agent.
-        
+
+        Token management: Content is truncated to prevent token explosion.
+
         Returns:
             Formatted memory context including long-term and recent memories.
         """
         parts = []
-        
-        # Long-term memory
+
+        # Long-term memory (with truncation)
         long_term = self.read_long_term()
         if long_term:
-            parts.append("## Long-term Memory\n" + long_term)
-        
-        # Today's notes
+            truncated = _truncate_text(long_term, self.long_term_max_chars)
+            parts.append("## Long-term Memory\n" + truncated)
+
+        # Today's notes (with truncation)
         today = self.read_today()
         if today:
-            parts.append("## Today's Notes\n" + today)
-        
+            truncated = _truncate_text(today, self.daily_max_chars)
+            parts.append("## Today's Notes\n" + truncated)
+
         return "\n\n".join(parts) if parts else ""
 
 
@@ -121,6 +161,10 @@ class MemUMemoryStore:
     - Automatic memory categorization
     - Multi-modal memory support (conversation, document, image)
     - Long-term memory with reinforcement learning
+
+    Token management:
+    - Top-K limits prevent token explosion from over-retrieval
+    - Query-based retrieval ensures only relevant memories are loaded
     """
 
     def __init__(self, config: Any):
@@ -133,6 +177,12 @@ class MemUMemoryStore:
         self.config = config
         self._service = None
         self._loop = None
+        # Token management limits from config
+        self.retrieve_config = getattr(config, 'retrieve', None)
+        if self.retrieve_config is None:
+            # Fallback to defaults if not configured
+            from nanobot.config.schema import RetrieveLimitsConfig
+            self.retrieve_config = RetrieveLimitsConfig()
 
     def _get_service(self):
         """Lazy initialize the MemU MemoryService."""
@@ -147,6 +197,9 @@ class MemUMemoryStore:
                 LLMProfilesConfig,
                 MemorizeConfig,
                 RetrieveConfig,
+                RetrieveCategoryConfig,
+                RetrieveItemConfig,
+                RetrieveResourceConfig,
                 BlobConfig,
             )
         except ImportError:
@@ -200,11 +253,28 @@ class MemUMemoryStore:
             "resources_dir": str(resources_dir),
         }
 
+        # Token management: Apply top_k limits from config (prevents token explosion)
+        retrieve_config = RetrieveConfig(
+            category=RetrieveCategoryConfig(
+                enabled=True,
+                top_k=self.retrieve_config.category_top_k,
+            ),
+            item=RetrieveItemConfig(
+                enabled=True,
+                top_k=self.retrieve_config.item_top_k,
+            ),
+            resource=RetrieveResourceConfig(
+                enabled=True,
+                top_k=self.retrieve_config.resource_top_k,
+            ),
+        )
+
         # Create service
         self._service = MemoryService(
             llm_profiles=llm_profiles,
             database_config=database_config,
             blob_config=blob_config,
+            retrieve_config=retrieve_config,
         )
 
         return self._service
@@ -318,36 +388,38 @@ class MemUMemoryStore:
 
         return result
 
-    def get_memory_context(self, query: str | None = None, user_id: str | None = None) -> str:
+    async def get_memory_context(
+        self,
+        query: str | None = None,
+        user_id: str | None = None,
+        max_chars: int = 3000,
+    ) -> str:
         """
         Get memory context for the agent.
+
+        Token management: Results are already limited by top_k config,
+        and the final output is truncated to max_chars.
 
         Args:
             query: Optional query to retrieve relevant memories.
             user_id: Optional user ID for filtering.
+            max_chars: Maximum characters for the formatted output.
 
         Returns:
             Formatted memory context as text.
         """
-        if query:
-            # Run async retrieve in sync context
-            loop = asyncio.get_event_loop()
-            try:
-                result = loop.run_until_complete(
-                    self.retrieve(query=query, user_id=user_id)
-                )
-            except RuntimeError:
-                # No running loop, create one
-                import asyncio
-                result = asyncio.run(self.retrieve(query=query, user_id=user_id))
+        if query and self.retrieve_config.use_query_retrieval:
+            result = await self.retrieve(query=query, user_id=user_id)
 
-            # Format results
+            # Format results with truncation per item
             parts = []
             if result.get("categories"):
                 parts.append("## Relevant Memory Categories\n")
                 for cat in result["categories"]:
                     name = cat.get("name", "Unknown")
                     summary = cat.get("summary", "")
+                    # Truncate each category summary to prevent bloat
+                    summary = _truncate_text(summary, 200)
                     parts.append(f"- **{name}**: {summary}")
 
             if result.get("items"):
@@ -355,9 +427,13 @@ class MemUMemoryStore:
                 for item in result["items"]:
                     mem_type = item.get("memory_type", "knowledge")
                     summary = item.get("summary", "")
+                    # Truncate each item summary to prevent bloat
+                    summary = _truncate_text(summary, 150)
                     parts.append(f"- [{mem_type}] {summary}")
 
-            return "\n".join(parts) if parts else ""
+            context = "\n".join(parts) if parts else ""
+            # Final truncation to ensure total length limit
+            return _truncate_text(context, max_chars, add_ellipsis=False)
 
         # No query, return generic context
         return "## Memory\nMemU memory system is active. Ask me to retrieve specific information."

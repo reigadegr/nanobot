@@ -10,6 +10,40 @@ from nanobot.agent.memory import MemoryStore, MemUMemoryStore
 from nanobot.agent.skills import SkillsLoader
 
 
+def _extract_query_from_messages(messages: list[dict[str, Any]]) -> str | None:
+    """
+    Extract a search query from the latest user message.
+
+    This enables query-based memory retrieval for MemU to limit
+    the memory context to only relevant information.
+
+    Args:
+        messages: List of message dictionaries.
+
+    Returns:
+        A query string extracted from the last user message, or None.
+    """
+    if not messages:
+        return None
+
+    # Get the last message from the user
+    for msg in reversed(messages):
+        role = msg.get("role", "")
+        if role == "user":
+            content = msg.get("content", "")
+            if isinstance(content, str):
+                # Use first 100 chars as query (enough for semantic search)
+                return content[:100].strip()
+            elif isinstance(content, list):
+                # Handle multimodal content
+                for item in content:
+                    if item.get("type") == "text":
+                        text = item.get("text", "")
+                        return text[:100].strip()
+
+    return None
+
+
 class ContextBuilder:
     """
     Builds the context (system prompt + messages) for the agent.
@@ -37,10 +71,20 @@ class ContextBuilder:
             self.memory = MemUMemoryStore(memu_config)
             self.memory_mode = "memu"
         else:
-            self.memory = MemoryStore(workspace)
+            # Apply token limits from config if available
+            long_term_max = None
+            daily_max = None
+            if memu_config and hasattr(memu_config, 'retrieve'):
+                long_term_max = memu_config.retrieve.long_term_max_chars
+                daily_max = memu_config.retrieve.daily_max_chars
+            self.memory = MemoryStore(
+                workspace,
+                long_term_max_chars=long_term_max,
+                daily_max_chars=daily_max,
+            )
             self.memory_mode = "file"
     
-    def build_system_prompt(self, skill_names: list[str] | None = None) -> str:
+    async def build_system_prompt(self, skill_names: list[str] | None = None) -> str:
         """
         Build the system prompt from bootstrap files, memory, and skills.
         
@@ -61,7 +105,7 @@ class ContextBuilder:
             parts.append(bootstrap)
         
         # Memory context
-        memory = self.memory.get_memory_context()
+        memory = await self.memory.get_memory_context()
         if memory:
             parts.append(f"# Memory\n\n{memory}")
         
@@ -133,7 +177,7 @@ When remembering something, write to {workspace_path}/memory/MEMORY.md"""
         
         return "\n\n".join(parts) if parts else ""
     
-    def build_messages(
+    async def build_messages(
         self,
         history: list[dict[str, Any]],
         current_message: str,
@@ -144,6 +188,9 @@ When remembering something, write to {workspace_path}/memory/MEMORY.md"""
     ) -> list[dict[str, Any]]:
         """
         Build the complete message list for an LLM call.
+
+        Token management: For MemU, uses query-based retrieval to limit
+        memory context to only relevant information.
 
         Args:
             history: Previous conversation messages.
@@ -158,8 +205,29 @@ When remembering something, write to {workspace_path}/memory/MEMORY.md"""
         """
         messages = []
 
-        # System prompt
-        system_prompt = self.build_system_prompt(skill_names)
+        # System prompt - for MemU, use query-based retrieval
+        system_prompt = await self.build_system_prompt(skill_names)
+
+        # For MemU memory, get query-based context to limit tokens
+        if self.memory_mode == "memu":
+            query = _extract_query_from_messages(history) or current_message[:100]
+            memory_context = await self.memory.get_memory_context(query=query, user_id=chat_id)
+            if memory_context:
+                # Replace the generic memory section with query-specific context
+                if "# Memory" in system_prompt:
+                    # Find and replace the Memory section
+                    parts = system_prompt.split("# Memory")
+                    if len(parts) > 1:
+                        # Keep everything before # Memory, then add our query-specific memory
+                        before = parts[0]
+                        # Find where the memory section ends (next # or end)
+                        after_parts = parts[1].split("\n\n#", 1)
+                        if len(after_parts) > 1:
+                            after = "\n\n#" + after_parts[1]
+                        else:
+                            after = ""
+                        system_prompt = before + memory_context + after
+
         if channel and chat_id:
             system_prompt += f"\n\n## Current Session\nChannel: {channel}\nChat ID: {chat_id}"
         messages.append({"role": "system", "content": system_prompt})

@@ -177,7 +177,7 @@ class AgentLoop:
             cron_tool.set_context(msg.channel, msg.chat_id)
         
         # Build initial messages (use get_history for LLM-formatted messages)
-        messages = self.context.build_messages(
+        messages = await self.context.build_messages(
             history=session.get_history(),
             current_message=msg.content,
             media=msg.media if msg.media else None,
@@ -285,7 +285,7 @@ class AgentLoop:
             cron_tool.set_context(origin_channel, origin_chat_id)
         
         # Build messages with the announce content
-        messages = self.context.build_messages(
+        messages = await self.context.build_messages(
             history=session.get_history(),
             current_message=msg.content,
             channel=origin_channel,

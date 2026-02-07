@@ -105,6 +105,19 @@ class ExecToolConfig(BaseModel):
     timeout: int = 60
 
 
+class RetrieveLimitsConfig(BaseModel):
+    """Token management configuration for memory retrieval."""
+    # Top-K limits for each retrieval tier (prevents token explosion)
+    category_top_k: int = Field(default=3, description="Max categories to retrieve")
+    item_top_k: int = Field(default=5, description="Max memory items to retrieve")
+    resource_top_k: int = Field(default=3, description="Max resources to retrieve")
+    # Context length limits for file-based memory
+    long_term_max_chars: int = Field(default=2000, description="Max chars for long-term memory")
+    daily_max_chars: int = Field(default=1000, description="Max chars for daily notes")
+    # Memory retrieval strategy
+    use_query_retrieval: bool = Field(default=True, description="Use query-based retrieval for MemU")
+
+
 class MemUConfig(BaseModel):
     """MemU memory system configuration."""
     enabled: bool = False
@@ -121,6 +134,8 @@ class MemUConfig(BaseModel):
     embed_model: str = "text-embedding-3-small"
     # Resources storage
     resources_dir: str = "~/.nanobot/memu/resources"
+    # Token management
+    retrieve: RetrieveLimitsConfig = Field(default_factory=RetrieveLimitsConfig)
 
 
 class ToolsConfig(BaseModel):

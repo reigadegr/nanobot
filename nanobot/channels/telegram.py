@@ -3,10 +3,12 @@
 import asyncio
 import logging
 import re
+from typing import Any
 
 from loguru import logger
 from telegram import Update
 from telegram.ext import Application, MessageHandler, filters, ContextTypes
+from httpx import Proxy as HttpxProxy, Timeout as HttpxTimeout
 
 # Suppress noisy network errors from Telegram polling (they auto-retry)
 logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -16,6 +18,33 @@ from nanobot.bus.events import OutboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.channels.base import BaseChannel
 from nanobot.config.schema import TelegramConfig
+
+
+def _parse_proxy_url(proxy_url: str) -> dict[str, Any]:
+    """
+    Parse proxy URL into httpx-compatible configuration.
+
+    Supports:
+    - http://host:port
+    - https://host:port
+    - socks5://host:port
+    - socks5h://host:port (remote DNS)
+    - http://user:pass@host:port (with auth)
+    """
+    if not proxy_url:
+        return {}
+
+    # Normalize URL: ensure protocol is lowercase
+    proxy_url = proxy_url.strip()
+
+    # Check if URL looks valid
+    if "://" not in proxy_url:
+        logger.warning(f"Invalid proxy URL (missing protocol): {proxy_url}")
+        return {}
+
+    # httpx accepts proxy as a string URL or dict with per-protocol proxies
+    # For simplicity, return the URL directly if it looks valid
+    return {"all": proxy_url}
 
 
 def _markdown_to_telegram_html(text: str) -> str:
@@ -102,9 +131,9 @@ class TelegramChannel(BaseChannel):
         if not self.config.token:
             logger.error("Telegram bot token not configured")
             return
-        
+
         self._running = True
-        
+
         # Build the application with connection settings for better reliability
         # Timeouts are for HTTP requests only, not for AI response generation
         builder = (
@@ -118,7 +147,14 @@ class TelegramChannel(BaseChannel):
 
         # Configure proxy if specified
         if self.config.proxy:
-            builder = builder.proxy(self.config.proxy)
+            proxy_config = _parse_proxy_url(self.config.proxy)
+            if proxy_config:
+                # python-telegram-bot accepts proxy as URL string or httpx.Proxy
+                proxy_url = proxy_config.get("all", self.config.proxy)
+                builder = builder.proxy(proxy_url)
+                logger.info(f"Using proxy: {self.config.proxy[:20]}...")
+            else:
+                logger.warning(f"Invalid proxy configuration, ignoring: {self.config.proxy}")
 
         self._app = builder.build()
         
@@ -140,17 +176,35 @@ class TelegramChannel(BaseChannel):
         # Initialize and start polling
         await self._app.initialize()
         await self._app.start()
-        
-        # Get bot info
-        bot_info = await self._app.bot.get_me()
-        logger.info(f"Telegram bot @{bot_info.username} connected")
-        
+
+        # Get bot info - this validates the connection
+        try:
+            bot_info = await self._app.bot.get_me()
+            logger.info(f"Telegram bot @{bot_info.username} connected")
+        except Exception as e:
+            logger.error(f"Failed to connect to Telegram API: {e}")
+            if self.config.proxy:
+                logger.error("Proxy connection failed. Please check:")
+                logger.error("  1. Proxy server is running")
+                logger.error("  2. Proxy URL format is correct (e.g., http://127.0.0.1:7890)")
+                logger.error("  3. Proxy supports HTTPS connections (CONNECT method)")
+                logger.error("  4. No firewall is blocking the proxy")
+            await self._app.shutdown()
+            self._app = None
+            return
+
         # Start polling (this runs until stopped)
-        await self._app.updater.start_polling(
-            allowed_updates=["message"],
-            drop_pending_updates=True  # Ignore old messages on startup
-        )
-        
+        try:
+            await self._app.updater.start_polling(
+                allowed_updates=["message"],
+                drop_pending_updates=True  # Ignore old messages on startup
+            )
+        except Exception as e:
+            logger.error(f"Failed to start polling: {e}")
+            await self._app.shutdown()
+            self._app = None
+            return
+
         # Keep running until stopped
         while self._running:
             await asyncio.sleep(1)
