@@ -3,8 +3,11 @@
 import base64
 import mimetypes
 import platform
+import time
 from pathlib import Path
 from typing import Any
+
+from loguru import logger
 
 from nanobot.agent.memory import MemoryStore, MemUMemoryStore
 from nanobot.agent.skills import SkillsLoader
@@ -87,36 +90,45 @@ class ContextBuilder:
     async def build_system_prompt(self, skill_names: list[str] | None = None) -> str:
         """
         Build the system prompt from bootstrap files, memory, and skills.
-        
+
         Args:
             skill_names: Optional list of skills to include.
-        
+
         Returns:
             Complete system prompt.
         """
+        start = time.time()
         parts = []
-        
+
         # Core identity
         parts.append(self._get_identity())
-        
+
         # Bootstrap files
+        bootstrap_start = time.time()
         bootstrap = self._load_bootstrap_files()
         if bootstrap:
             parts.append(bootstrap)
-        
+        bootstrap_time = time.time() - bootstrap_start
+        if bootstrap_time > 0.1:
+            logger.info(f"[PERF] Bootstrap files loaded in {bootstrap_time:.2f}s")
+
         # Memory context
+        memory_start = time.time()
         memory = await self.memory.get_memory_context()
+        memory_time = time.time() - memory_start
+        logger.info(f"[PERF] Memory context retrieved in {memory_time:.2f}s (mode: {self.memory_mode})")
         if memory:
             parts.append(f"# Memory\n\n{memory}")
-        
+
         # Skills - progressive loading
         # 1. Always-loaded skills: include full content
+        skills_start = time.time()
         always_skills = self.skills.get_always_skills()
         if always_skills:
             always_content = self.skills.load_skills_for_context(always_skills)
             if always_content:
                 parts.append(f"# Active Skills\n\n{always_content}")
-        
+
         # 2. Available skills: only show summary (agent uses read_file to load)
         skills_summary = self.skills.build_skills_summary()
         if skills_summary:
@@ -126,7 +138,12 @@ The following skills extend your capabilities. To use a skill, read its SKILL.md
 Skills with available="false" need dependencies installed first - you can try installing them with apt/brew.
 
 {skills_summary}""")
-        
+        skills_time = time.time() - skills_start
+        if skills_time > 0.1:
+            logger.info(f"[PERF] Skills loaded in {skills_time:.2f}s")
+
+        total_time = time.time() - start
+        logger.info(f"[PERF] build_system_prompt total: {total_time:.2f}s")
         return "\n\n---\n\n".join(parts)
     
     def _get_identity(self) -> str:
@@ -203,6 +220,8 @@ When remembering something, write to {workspace_path}/memory/MEMORY.md"""
         Returns:
             List of messages including system prompt.
         """
+        import time
+        start = time.time()
         messages = []
 
         # System prompt - for MemU, use query-based retrieval
@@ -210,8 +229,11 @@ When remembering something, write to {workspace_path}/memory/MEMORY.md"""
 
         # For MemU memory, get query-based context to limit tokens
         if self.memory_mode == "memu":
+            query_retrieval_start = time.time()
             query = _extract_query_from_messages(history) or current_message[:100]
             memory_context = await self.memory.get_memory_context(query=query, user_id=chat_id)
+            query_retrieval_time = time.time() - query_retrieval_start
+            logger.info(f"[PERF] MemU query retrieval took {query_retrieval_time:.2f}s")
             if memory_context:
                 # Replace the generic memory section with query-specific context
                 if "# Memory" in system_prompt:
@@ -239,6 +261,8 @@ When remembering something, write to {workspace_path}/memory/MEMORY.md"""
         user_content = self._build_user_content(current_message, media)
         messages.append({"role": "user", "content": user_content})
 
+        total_time = time.time() - start
+        logger.info(f"[PERF] build_messages total: {total_time:.2f}s")
         return messages
 
     def _build_user_content(self, text: str, media: list[str] | None) -> str | list[dict[str, Any]]:

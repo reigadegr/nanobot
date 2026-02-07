@@ -2,10 +2,12 @@
 
 import asyncio
 import os
+import time
 from typing import Any
 
 import litellm
 from litellm import acompletion
+from loguru import logger
 
 from nanobot.providers.base import LLMProvider, LLMResponse, ToolCallRequest
 
@@ -148,14 +150,17 @@ class LiteLLMProvider(LLMProvider):
         if tools:
             kwargs["tools"] = tools
             kwargs["tool_choice"] = "auto"
-        
+
         # Retry logic with exponential backoff for rate limits
         max_retries = 5
         base_delay = 2  # seconds
 
+        chat_start = time.time()
         for attempt in range(max_retries):
             try:
                 response = await acompletion(**kwargs)
+                chat_time = time.time() - chat_start
+                logger.info(f"[PERF] LLM chat took {chat_time:.2f}s (model: {model}, attempt: {attempt + 1})")
                 return self._parse_response(response)
             except Exception as e:
                 error_str = str(e).lower()

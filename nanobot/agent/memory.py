@@ -2,9 +2,12 @@
 
 import asyncio
 import json
+import time
 from pathlib import Path
 from datetime import datetime
 from typing import Any
+
+from loguru import logger
 
 from nanobot.utils.helpers import ensure_dir, today_date
 
@@ -376,6 +379,7 @@ class MemUMemoryStore:
         Returns:
             Retrieved memories with categories, items, and resources.
         """
+        retrieve_start = time.time()
         service = self._get_service()
 
         queries = [{"role": "user", "content": {"text": query}}]
@@ -386,6 +390,8 @@ class MemUMemoryStore:
             where=where,
         )
 
+        retrieve_time = time.time() - retrieve_start
+        logger.info(f"[PERF] MemU.retrieve() took {retrieve_time:.2f}s (query: {query[:50]}...)")
         return result
 
     async def get_memory_context(

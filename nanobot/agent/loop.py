@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import time
 from pathlib import Path
 from typing import Any
 
@@ -145,37 +146,39 @@ class AgentLoop:
     async def _process_message(self, msg: InboundMessage) -> OutboundMessage | None:
         """
         Process a single inbound message.
-        
+
         Args:
             msg: The inbound message to process.
-        
+
         Returns:
             The response message, or None if no response needed.
         """
+        process_start = time.time()
+
         # Handle system messages (subagent announces)
         # The chat_id contains the original "channel:chat_id" to route back to
         if msg.channel == "system":
             return await self._process_system_message(msg)
-        
+
         preview = msg.content[:80] + "..." if len(msg.content) > 80 else msg.content
         logger.info(f"Processing message from {msg.channel}:{msg.sender_id}: {preview}")
-        
+
         # Get or create session
         session = self.sessions.get_or_create(msg.session_key)
-        
+
         # Update tool contexts
         message_tool = self.tools.get("message")
         if isinstance(message_tool, MessageTool):
             message_tool.set_context(msg.channel, msg.chat_id)
-        
+
         spawn_tool = self.tools.get("spawn")
         if isinstance(spawn_tool, SpawnTool):
             spawn_tool.set_context(msg.channel, msg.chat_id)
-        
+
         cron_tool = self.tools.get("cron")
         if isinstance(cron_tool, CronTool):
             cron_tool.set_context(msg.channel, msg.chat_id)
-        
+
         # Build initial messages (use get_history for LLM-formatted messages)
         messages = await self.context.build_messages(
             history=session.get_history(),
@@ -184,21 +187,21 @@ class AgentLoop:
             channel=msg.channel,
             chat_id=msg.chat_id,
         )
-        
+
         # Agent loop
         iteration = 0
         final_content = None
-        
+
         while iteration < self.max_iterations:
             iteration += 1
-            
+
             # Call LLM
             response = await self.provider.chat(
                 messages=messages,
                 tools=self.tools.get_definitions(),
                 model=self.model
             )
-            
+
             # Handle tool calls
             if response.has_tool_calls:
                 # Add assistant message with tool calls
@@ -216,12 +219,15 @@ class AgentLoop:
                 messages = self.context.add_assistant_message(
                     messages, response.content, tool_call_dicts
                 )
-                
+
                 # Execute tools
                 for tool_call in response.tool_calls:
                     args_str = json.dumps(tool_call.arguments, ensure_ascii=False)
                     logger.info(f"Tool call: {tool_call.name}({args_str[:200]})")
+                    tool_start = time.time()
                     result = await self.tools.execute(tool_call.name, tool_call.arguments)
+                    tool_time = time.time() - tool_start
+                    logger.info(f"[PERF] Tool {tool_call.name} took {tool_time:.2f}s")
                     messages = self.context.add_tool_result(
                         messages, tool_call.id, tool_call.name, result
                     )
@@ -229,19 +235,22 @@ class AgentLoop:
                 # No tool calls, we're done
                 final_content = response.content
                 break
-        
+
         if final_content is None:
             final_content = "I've completed processing but have no response to give."
-        
+
         # Log response preview
         preview = final_content[:120] + "..." if len(final_content) > 120 else final_content
         logger.info(f"Response to {msg.channel}:{msg.sender_id}: {preview}")
-        
+
         # Save to session
         session.add_message("user", msg.content)
         session.add_message("assistant", final_content)
         self.sessions.save(session)
-        
+
+        total_time = time.time() - process_start
+        logger.info(f"[PERF] _process_message total: {total_time:.2f}s (iterations: {iteration})")
+
         return OutboundMessage(
             channel=msg.channel,
             chat_id=msg.chat_id,
